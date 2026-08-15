@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astroio"
+version = "0.1.0"
+description = "Frame-oriented IO for astronomy and image-sequence formats."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+]
+
+[project.optional-dependencies]
+exr = []
+video = [
+    "av",
+]
+fits = [
+    "astropy",
+]
+tiff = [
+    "tifffile",
+]
+all = [
+    "av",
+    "astropy",
+    "tifffile",
+    "Pillow",
+]
+
+[tool.setuptools]
+packages = ["astroio"]
+
+[tool.setuptools.package-dir]
+astroio = "."

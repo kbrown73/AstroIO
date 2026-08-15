@@ -12,6 +12,7 @@ from .exceptions import (
 from .exr import ExrReader, ExrWriter
 from .factory import open_reader, open_writer, register_reader, register_writer
 from .image_sequence import ImageSequenceReader
+from .video import VideoReader
 
 __all__ = [
     "AstroIOError",
@@ -26,6 +27,7 @@ __all__ = [
     "RandomAccessUnsupportedError",
     "UnsupportedFormatError",
     "UnsupportedPixelFormatError",
+    "VideoReader",
     "open_reader",
     "open_writer",
     "register_reader",

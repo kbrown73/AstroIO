@@ -26,12 +26,12 @@ Implemented:
 - EXR single-frame reading through OpenImageIO.
 - EXR image-sequence reading.
 - EXR writing through OpenImageIO.
+- MP4 / MOV / AVI / MKV video reading through PyAV.
 - Reader and writer factory functions.
 - Frame side-channel metadata through `FrameInfo`.
 
 Planned:
 
-- MP4 / AVI / other video containers through PyAV.
 - TIFF and PNG image sequences.
 - FITS.
 - SER.
@@ -50,10 +50,15 @@ Current EXR support:
 OpenImageIO
 ```
 
+Current video support:
+
+```text
+av
+```
+
 Planned optional backends:
 
 ```text
-av          # MP4 / AVI / video containers
 astropy     # FITS
 tifffile    # TIFF sequences
 Pillow      # PNG/JPEG fallback
@@ -73,6 +78,12 @@ AstroIO. A quick check:
 
 ```bash
 python3 -c "import numpy, OpenImageIO"
+```
+
+For standalone development from an AstroIO checkout:
+
+```bash
+python3 -m pip install -e .
 ```
 
 ## Reading
@@ -202,9 +213,30 @@ write_exr("frame.exr", frame, half=True)
 
 `half=True` writes HALF pixels. Use `half=False` for FLOAT output.
 
-## Video Roadmap
+## Video Reading
 
 MP4 and many AVI files are decoded from compressed video rather than preserved
-as native astronomy image data. The planned video reader will expose decoded
-frames, record codec/container/source pixel-format metadata, and avoid extra
-hidden conversion beyond what the decoder requires.
+as native astronomy image data. AstroIO exposes decoded frames, records
+codec/container/source pixel-format metadata, and avoids extra hidden conversion
+beyond what the decoder requires.
+
+Video readers are sequential-only in the current implementation:
+
+```python
+with astroio.open_reader("clip.mp4") as reader:
+    for frame in reader:
+        process(frame)
+```
+
+`reader[index]` raises `RandomAccessUnsupportedError`.
+
+The default video `output_format` is `"auto"`:
+
+- 8-bit source formats decode to `rgb24` / `uint8`
+- higher bit-depth source formats decode to `rgb48le` / `uint16`
+
+You can request an explicit decoded format:
+
+```python
+reader = astroio.open_reader("clip.mp4", output_format="rgb48le")
+```
