@@ -1,77 +1,83 @@
 # AstroIO
 
-AstroIO is a small Python module for reading astronomy and image-sequence
-formats through a common frame-oriented API.
+AstroIO is a small Python module for reading and writing astronomy and
+image-sequence formats through a common frame-oriented API.
 
-The core contract is simple:
+It is designed for processing pipelines that want to work with NumPy arrays
+without baking format-specific code into the processing layer.
 
-- readers return NumPy arrays
-- mono frames are returned as `(height, width)`
-- RGB/RGBA frames are returned as `(height, width, channels)`
-- readers preserve source dtype, bit depth, colour space, channel count, and CFA
-  layout where the backend can expose them
-- processing code performs explicit conversion to working formats such as
-  `float32`
+## Goals
 
-## Initial Scope
+- Provide a common reader interface for frame-based sources.
+- Return frames as NumPy arrays.
+- Preserve source pixel data as closely as the backend permits.
+- Keep IO concerns separate from processing concerns.
+- Make format-specific metadata available without forcing every format into one
+  rigid schema.
 
-Implementation priority:
+AstroIO does not implicitly normalize images, debayer raw data, convert colour
+spaces, resize frames, apply gamma, or promote data to a working dtype. Those
+steps belong in the calling application.
 
-1. EXR image sequences
-2. MP4 / AVI / other video containers through PyAV
-3. Other image sequences such as TIFF and PNG
-4. FITS
-5. SER
+## Current Status
 
-Writer support is intentionally secondary until a concrete workflow needs it.
-The current concrete writer support is EXR output backed by OpenImageIO.
+Implemented:
 
-## Runtime Requirements
+- EXR single-frame reading through OpenImageIO.
+- EXR image-sequence reading.
+- EXR writing through OpenImageIO.
+- Reader and writer factory functions.
+- Frame side-channel metadata through `FrameInfo`.
 
-Core AstroIO needs:
+Planned:
+
+- MP4 / AVI / other video containers through PyAV.
+- TIFF and PNG image sequences.
+- FITS.
+- SER.
+
+## Requirements
+
+Core:
 
 ```text
 numpy
 ```
 
-Planned backend dependencies:
+Current EXR support:
 
 ```text
-av              # MP4 / AVI / video containers via PyAV
-OpenImageIO     # likely first EXR backend, matching eclipse_align
-astropy         # FITS
-tifffile        # TIFF sequences
-Pillow          # PNG/JPEG fallback
+OpenImageIO
 ```
 
-`av` is enough for the planned video reader. For the first EXR milestone this
-repo currently uses the Python `OpenImageIO` bindings, so that package also
-needs to be importable in the Python environment used to run AstroIO.
-
-Be careful about Python environments. In this checkout, `pytest` may run under a
-different interpreter than the shell `python` or `pip`. Check the target
-environment directly, for example:
-
-```bash
-python -c "import av, OpenImageIO"
-/usr/bin/python3 -c "import av, OpenImageIO"
-```
-
-On Debian/Ubuntu-like systems the current `eclipse_align` setup has used:
+Planned optional backends:
 
 ```text
-python3-numpy
+av          # MP4 / AVI / video containers
+astropy     # FITS
+tifffile    # TIFF sequences
+Pillow      # PNG/JPEG fallback
+```
+
+On Debian/Ubuntu-like systems, OpenImageIO may be available through packages
+such as:
+
+```text
 python3-openimageio
 openimageio-tools
 openexr
 ```
 
-The exact packaging may differ if AstroIO is later split into a standalone
-module or installed with Python package extras.
+Make sure dependencies are installed into the same Python environment that runs
+AstroIO. A quick check:
 
-## Reader API
+```bash
+python3 -c "import numpy, OpenImageIO"
+```
 
-Typical usage:
+## Reading
+
+Use `open_reader()` for normal application code:
 
 ```python
 import astroio
@@ -97,7 +103,76 @@ Readers expose:
 - `metadata`
 - `frame_info(index)`
 
-## EXR Writing
+`frame_count` is always known for a `FrameReader`. Sources that cannot provide a
+known count cheaply should use a future streaming API rather than this base
+reader interface.
+
+## Frame Shape And Dtype
+
+Mono frames are returned as 2D arrays:
+
+```python
+frame.shape == (height, width)
+```
+
+RGB/RGBA frames are returned with an explicit channel dimension:
+
+```python
+frame.shape == (height, width, channels)
+```
+
+The returned dtype reflects the decoded source representation exposed by the
+backend. For example, EXR HALF data is returned as `float16`, and EXR FLOAT data
+is returned as `float32`.
+
+Applications that need a specific working format should convert explicitly:
+
+```python
+working = frame.astype("float32", copy=False)
+```
+
+## FrameInfo
+
+`frame_info(index)` returns per-frame side-channel information without wrapping
+the NumPy array itself:
+
+```python
+info = reader.frame_info(2)
+print(info.source_path)
+print(info.source_number)
+```
+
+The AstroIO frame index is dense and 0-based. `source_number`, where available,
+is metadata inferred from filenames or containers.
+
+Example:
+
+```text
+reader[0] -> IMG_0001.exr, source_number=1
+reader[1] -> IMG_0002.exr, source_number=2
+reader[2] -> IMG_0004.exr, source_number=4
+```
+
+In this example `IMG_0003.exr` is missing from the source numbering, but
+`reader[2]` is still valid and returns `IMG_0004.exr`.
+
+## Image Sequences
+
+AstroIO treats discovered image files as the ordered frames to process.
+Numbering gaps are non-fatal by default: the reader warns and continues.
+
+Supported forms:
+
+```python
+astroio.open_reader("IMG_*.exr")
+astroio.open_reader("IMG_####.exr")
+astroio.open_reader(["IMG_0001.exr", "IMG_0002.exr", "IMG_0004.exr"], format="exr")
+```
+
+Sequence frames must currently have consistent dimensions, dtype, and channel
+count.
+
+## Writing EXR
 
 EXR writing is available through the generic writer API:
 
@@ -117,7 +192,7 @@ with astroio.open_writer(
     writer.write(frame)
 ```
 
-The convenience helper is also available for simple single-frame writes:
+For simple single-frame EXR output, use the convenience helper:
 
 ```python
 from astroio.exr import write_exr
@@ -125,47 +200,11 @@ from astroio.exr import write_exr
 write_exr("frame.exr", frame, half=True)
 ```
 
-`half=True` writes HALF pixels, matching the current `eclipse_align` output
-default. Use `half=False` for FLOAT output.
+`half=True` writes HALF pixels. Use `half=False` for FLOAT output.
 
-`frame_count` is always known for a `FrameReader`. If a source cannot provide a
-known count cheaply, it should be handled by a future streaming API rather than
-this base reader interface.
-
-## FrameInfo
-
-`frame_info(index)` returns side-channel information without wrapping each NumPy
-array:
-
-```python
-FrameInfo(
-    index=2,
-    source_path=Path("IMG_0004.exr"),
-    source_number=4,
-)
-```
-
-The AstroIO `index` is always dense and 0-based. `source_number` is metadata
-inferred from filenames or containers when available.
-
-## Image Sequence Gaps
-
-AstroIO treats discovered image files as the ordered frames to process. If a
-numbered sequence appears to skip a source number, the reader should warn by
-default but continue:
-
-```text
-reader[0] -> IMG_0001.exr
-reader[1] -> IMG_0002.exr
-reader[2] -> IMG_0004.exr
-```
-
-In this example `IMG_0003.exr` is informationally missing, but `reader[2]` is
-valid and returns `IMG_0004.exr`.
-
-## Video Notes
+## Video Roadmap
 
 MP4 and many AVI files are decoded from compressed video rather than preserved
-as native astronomy image data. AstroIO should expose the decoded pixel
-representation clearly, record codec/container/source pixel-format metadata, and
-avoid hidden conversion beyond what the decoder requires.
+as native astronomy image data. The planned video reader will expose decoded
+frames, record codec/container/source pixel-format metadata, and avoid extra
+hidden conversion beyond what the decoder requires.
