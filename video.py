@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from fractions import Fraction
+import re
 from pathlib import Path
 from typing import Any
 
 import av
+import cv2
 import numpy as np
 
 from .base import FrameInfo, FrameReader
@@ -24,14 +26,17 @@ _OUTPUT_CHANNELS = {
     "gray": 1,
     "gray16le": 1,
 }
+_BAYER_PATTERNS = {"RGGB", "BGGR", "GBRG", "GRBG"}
+_BAYER_FORMAT_RE = re.compile(r"^bayer_(rggb|bggr|gbrg|grbg)(8|16)(?:le|be)?$")
 
 
 class VideoReader(FrameReader):
     """Sequential PyAV-backed video reader."""
 
-    def __init__(self, path: str | Path, *, output_format: str = _AUTO_FORMAT):
+    def __init__(self, path: str | Path, *, output_format: str = _AUTO_FORMAT, debayer: str = "none"):
         self.path = Path(path)
         self._requested_output_format = output_format
+        self._requested_debayer = debayer
 
         with _open_container(self.path) as container:
             stream = _video_stream(container)
@@ -52,7 +57,12 @@ class VideoReader(FrameReader):
             self._source_pixel_format = self._source_pixel_format or scan["source_pixel_format"]
             self._timestamps = scan["timestamps"]
 
-        self._output_format = _resolve_output_format(self._requested_output_format, self._source_pixel_format)
+        self._debayer_pattern = _resolve_debayer_pattern(self._requested_debayer, self._source_pixel_format)
+        self._output_format = _resolve_output_format(
+            self._requested_output_format,
+            self._source_pixel_format,
+            debayer_pattern=self._debayer_pattern,
+        )
 
     @property
     def width(self) -> int:
@@ -95,6 +105,8 @@ class VideoReader(FrameReader):
             "source_pixel_format": self._source_pixel_format,
             "requested_output_format": self._requested_output_format,
             "output_format": self._output_format,
+            "requested_debayer": self._requested_debayer,
+            "debayer_pattern": self._debayer_pattern,
             "duration_seconds": self._duration,
             "time_base": self._time_base,
         }
@@ -107,7 +119,7 @@ class VideoReader(FrameReader):
         with _open_container(self.path) as container:
             stream = _video_stream(container)
             for frame in container.decode(stream):
-                yield _frame_to_ndarray(frame, self._output_format)
+                yield _frame_to_ndarray(frame, self._output_format, debayer_pattern=self._debayer_pattern)
 
     def frame_info(self, index: int) -> FrameInfo:
         self._validate_index(index)
@@ -129,7 +141,15 @@ def _video_stream(container):
         raise CorruptFileError("Video container has no video stream") from exc
 
 
-def _frame_to_ndarray(frame, output_format: str) -> np.ndarray:
+def _frame_to_ndarray(frame, output_format: str, *, debayer_pattern: str | None = None) -> np.ndarray:
+    if debayer_pattern is not None:
+        raw_format = _raw_bayer_format_for_output(output_format)
+        image = frame.to_ndarray(format=raw_format)
+        image = np.asarray(image)
+        if image.ndim == 3 and image.shape[2] == 1:
+            image = image[:, :, 0]
+        return _debayer_mosaic(image, debayer_pattern)
+
     image = frame.to_ndarray(format=output_format)
     image = np.asarray(image)
     if image.ndim == 3 and image.shape[2] == 1:
@@ -137,18 +157,30 @@ def _frame_to_ndarray(frame, output_format: str) -> np.ndarray:
     return image
 
 
-def _resolve_output_format(requested: str, source_pixel_format: str | None) -> str:
+def _resolve_output_format(
+    requested: str,
+    source_pixel_format: str | None,
+    *,
+    debayer_pattern: str | None = None,
+) -> str:
     if requested != _AUTO_FORMAT:
         if requested not in _OUTPUT_DTYPES:
             raise UnsupportedPixelFormatError(f"Unsupported video output format: {requested}")
+        if debayer_pattern is not None and requested not in {"rgb24", "rgb48le"}:
+            raise UnsupportedPixelFormatError("Debayering requires an RGB video output format")
         return requested
     source_bits = _source_component_bits(source_pixel_format)
+    if debayer_pattern is not None:
+        return "rgb48le" if source_bits > 8 else "rgb24"
     return "rgb48le" if source_bits > 8 else "rgb24"
 
 
 def _source_component_bits(source_pixel_format: str | None) -> int:
     if source_pixel_format is None:
         return 8
+    match = _BAYER_FORMAT_RE.match(source_pixel_format)
+    if match is not None:
+        return int(match.group(2))
     try:
         pixel_format = av.VideoFormat(source_pixel_format)
     except ValueError:
@@ -161,6 +193,48 @@ def _format_name(format_desc) -> str | None:
     if format_desc is None:
         return None
     return format_desc.name
+
+
+def _resolve_debayer_pattern(requested: str, source_pixel_format: str | None) -> str | None:
+    token = requested.strip().upper()
+    if token == _AUTO_FORMAT.upper():
+        pattern = _source_bayer_pattern(source_pixel_format)
+        if pattern is None:
+            source = source_pixel_format or "unknown"
+            raise UnsupportedPixelFormatError(
+                f"Could not infer debayer pattern from video pixel format: {source}. "
+                "Pass debayer='RGGB', 'BGGR', 'GBRG', or 'GRBG', or use debayer='none'."
+            )
+        return pattern
+    if token == "NONE":
+        return None
+    if token not in _BAYER_PATTERNS:
+        raise UnsupportedPixelFormatError(f"Unsupported debayer pattern: {requested}")
+    return token
+
+
+def _source_bayer_pattern(source_pixel_format: str | None) -> str | None:
+    if source_pixel_format is None:
+        return None
+    match = _BAYER_FORMAT_RE.match(source_pixel_format)
+    if match is None:
+        return None
+    return match.group(1).upper()
+
+
+def _raw_bayer_format_for_output(output_format: str) -> str:
+    if output_format == "rgb48le":
+        return "gray16le"
+    if output_format == "rgb24":
+        return "gray"
+    raise UnsupportedPixelFormatError("Debayering requires an RGB video output format")
+
+
+def _debayer_mosaic(image: np.ndarray, pattern: str) -> np.ndarray:
+    if image.ndim != 2:
+        raise UnsupportedPixelFormatError("Debayering requires a single-channel raw mosaic frame")
+    code = getattr(cv2, f"COLOR_Bayer{pattern}2RGB")
+    return cv2.cvtColor(image, code)
 
 
 def _rate_to_float(rate: Fraction | None) -> float | None:

@@ -240,3 +240,13 @@ You can request an explicit decoded format:
 ```python
 reader = astroio.open_reader("clip.mp4", output_format="rgb48le")
 ```
+
+Raw Bayer video can be debayered by passing `debayer`. The default is `"none"`
+for plain `astroio.open_reader()` calls. Use `"auto"` to require Bayer metadata
+from a decoder pixel format such as `bayer_grbg8`; if that metadata is not
+available, `auto` raises `UnsupportedPixelFormatError`. Pass one of `"RGGB"`,
+`"BGGR"`, `"GBRG"`, or `"GRBG"` when the container does not expose the pattern:
+
+```python
+reader = astroio.open_reader("raw.avi", debayer="GRBG")
+```
